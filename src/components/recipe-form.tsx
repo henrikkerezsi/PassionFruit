@@ -1,0 +1,396 @@
+import React, { useState } from 'react';
+import { StyleSheet, View } from 'react-native';
+import { Button, Card, Divider, IconButton, Text, TextInput } from 'react-native-paper';
+import type { BrewMethodId, GrindUnit, Recipe, StepKind } from '../models';
+import { BREW_METHOD_IDS, GRIND_UNITS, STEP_KIND_IDS } from '../models';
+import type { RecipeInput, RecipeStepInput } from '../database/recipes';
+import { useAppData } from '../data/DataProvider';
+import { useAppTheme } from '../theme';
+import { GRIND_UNIT_LABELS, METHOD_LABELS, STEP_KIND_LABELS } from '../utils/labels';
+import { KeyboardAwareScrollView } from './keyboard-aware-scroll-view';
+import { NumberField } from './number-field';
+import { OptionField } from './option-field';
+
+interface RecipeFormProps {
+  initial: Recipe | null;
+  initialSteps: RecipeStepInput[];
+  submitting: boolean;
+  onSubmit: (input: RecipeInput) => Promise<void>;
+}
+
+const METHOD_OPTIONS = BREW_METHOD_IDS.map((value) => ({
+  value,
+  label: METHOD_LABELS[value],
+}));
+const STEP_KIND_OPTIONS = STEP_KIND_IDS.map((value) => ({
+  value,
+  label: STEP_KIND_LABELS[value],
+}));
+const GRIND_UNIT_OPTIONS = GRIND_UNITS.map((value) => ({
+  value,
+  label: GRIND_UNIT_LABELS[value],
+}));
+
+const EMPTY_STEP: RecipeStepInput = {
+  kind: null,
+  label: null,
+  targetWaterG: null,
+  pourWaterG: null,
+  pourDurationS: null,
+  waitAfterS: null,
+  agitationCount: null,
+  agitationKind: null,
+  temperatureC: null,
+  note: null,
+};
+
+export function RecipeForm({
+  initial,
+  initialSteps,
+  submitting,
+  onSubmit,
+}: RecipeFormProps) {
+  const theme = useAppTheme();
+  const { brewers, beans, grindSettings } = useAppData();
+
+  const [name, setName] = useState(initial?.name ?? '');
+  const [methodId, setMethodId] = useState<BrewMethodId>(
+    initial?.methodId ?? 'v60'
+  );
+  const [brewerId, setBrewerId] = useState<number | null>(initial?.brewerId ?? null);
+  const [beanId, setBeanId] = useState<number | null>(initial?.beanId ?? null);
+  const [doseG, setDoseG] = useState<number | null>(initial?.doseG ?? null);
+  const [waterTotalG, setWaterTotalG] = useState<number | null>(
+    initial?.waterTotalG ?? null
+  );
+  const [waterTempC, setWaterTempC] = useState<number | null>(
+    initial?.waterTempC ?? null
+  );
+  const [grinderId, setGrinderId] = useState<number | null>(initial?.grinderId ?? null);
+  const [grindSettingId, setGrindSettingId] = useState<number | null>(
+    initial?.grindSettingId ?? null
+  );
+  const [grindValue, setGrindValue] = useState<number | null>(initial?.grindValue ?? null);
+  const [grindUnit, setGrindUnit] = useState<GrindUnit | null>(
+    initial?.grindUnit ?? null
+  );
+  const [expectedTotalTimeS, setExpectedTotalTimeS] = useState<number | null>(
+    initial?.expectedTotalTimeS ?? null
+  );
+  const [notes, setNotes] = useState(initial?.notes ?? '');
+  const [steps, setSteps] = useState<RecipeStepInput[]>(initialSteps);
+  const [error, setError] = useState<string | null>(null);
+
+  const brewerOptions = brewers.map((brewer) => ({
+    value: brewer.id,
+    label: brewer.name,
+  }));
+  const beanOptions = beans.map((bean) => ({ value: bean.id, label: bean.name }));
+  const grinderOptions = brewers
+    .filter((brewer) => brewer.kind === 'grinder')
+    .map((brewer) => ({ value: brewer.id, label: brewer.name }));
+  const settingOptions = grindSettings
+    .filter((setting) => grinderId === null || setting.brewerId === grinderId)
+    .map((setting) => ({ value: setting.id, label: setting.name }));
+
+  const updateStep = (index: number, patch: Partial<RecipeStepInput>) => {
+    setSteps((current) =>
+      current.map((step, position) =>
+        position === index ? { ...step, ...patch } : step
+      )
+    );
+  };
+
+  const handleSubmit = async () => {
+    if (name.trim() === '') {
+      setError('Give the recipe a name.');
+      return;
+    }
+    if (steps.length === 0) {
+      setError('A recipe needs at least one step.');
+      return;
+    }
+    setError(null);
+    await onSubmit({
+      name: name.trim(),
+      methodId,
+      brewerId,
+      beanId,
+      source: 'own',
+      parentRecipeId: initial?.id ?? null,
+      isBuiltin: false,
+      doseG,
+      waterTotalG,
+      waterTempC,
+      grinderId,
+      grindSettingId,
+      grindValue,
+      grindUnit,
+      expectedTotalTimeS,
+      notes: notes.trim() === '' ? null : notes.trim(),
+      steps,
+    });
+  };
+
+  return (
+    <KeyboardAwareScrollView
+      contentContainerStyle={[styles.container, { padding: theme.spacing[4] }]}
+    >
+      <TextInput
+        label="Name"
+        mode="outlined"
+        value={name}
+        onChangeText={setName}
+        error={Boolean(error)}
+        autoFocus={initial === null}
+      />
+      <View style={styles.field}>
+        <OptionField<BrewMethodId>
+          label="Method"
+          value={methodId}
+          options={METHOD_OPTIONS}
+          onChange={(value) => setMethodId(value ?? 'v60')}
+          nullable={false}
+        />
+      </View>
+
+      <View style={styles.grid}>
+        <View style={styles.gridItem}>
+          <NumberField label="Dose" value={doseG} onChange={setDoseG} unit="g" />
+        </View>
+        <View style={styles.gridItem}>
+          <NumberField
+            label="Water"
+            value={waterTotalG}
+            onChange={setWaterTotalG}
+            unit="g"
+          />
+        </View>
+        <View style={styles.gridItem}>
+          <NumberField
+            label="Temperature"
+            value={waterTempC}
+            onChange={setWaterTempC}
+            unit="°C"
+          />
+        </View>
+        <View style={styles.gridItem}>
+          <NumberField
+            label="Total time"
+            value={expectedTotalTimeS}
+            onChange={setExpectedTotalTimeS}
+            unit="s"
+            integer
+          />
+        </View>
+      </View>
+
+      <Divider style={styles.divider} />
+      <Text variant="titleSmall" style={styles.groupTitle}>
+        Grind
+      </Text>
+      <OptionField<number>
+        label="Grinder"
+        value={grinderId}
+        options={grinderOptions}
+        onChange={setGrinderId}
+        emptyLabel="Not set"
+      />
+      <View style={styles.field}>
+        <OptionField<number>
+          label="Grind setting"
+          value={grindSettingId}
+          options={settingOptions}
+          onChange={setGrindSettingId}
+          emptyLabel="Not set"
+        />
+      </View>
+      <View style={styles.grid}>
+        <View style={styles.gridItem}>
+          <NumberField label="Grind value" value={grindValue} onChange={setGrindValue} />
+        </View>
+        <View style={styles.gridItem}>
+          <OptionField<GrindUnit>
+            label="Unit"
+            value={grindUnit}
+            options={GRIND_UNIT_OPTIONS}
+            onChange={setGrindUnit}
+            emptyLabel="Not set"
+          />
+        </View>
+      </View>
+
+      <Divider style={styles.divider} />
+      <Text variant="titleSmall" style={styles.groupTitle}>
+        Brew with
+      </Text>
+      <OptionField<number>
+        label="Brewer"
+        value={brewerId}
+        options={brewerOptions}
+        onChange={setBrewerId}
+        emptyLabel="Any"
+      />
+      <View style={styles.field}>
+        <OptionField<number>
+          label="Bean"
+          value={beanId}
+          options={beanOptions}
+          onChange={setBeanId}
+          emptyLabel="Any"
+        />
+      </View>
+
+      <Divider style={styles.divider} />
+      <Text variant="titleSmall" style={styles.groupTitle}>
+        Steps
+      </Text>
+      {steps.map((step, index) => (
+        <Card key={index} mode="outlined" style={styles.stepCard}>
+          <Card.Content>
+            <View style={styles.stepHeader}>
+              <Text variant="labelLarge">Step {index + 1}</Text>
+              <IconButton
+                icon="delete-outline"
+                size={20}
+                accessibilityLabel={`Remove step ${index + 1}`}
+                onPress={() =>
+                  setSteps((current) => current.filter((_, position) => position !== index))
+                }
+              />
+            </View>
+            <OptionField<StepKind>
+              label="Kind"
+              value={step.kind}
+              options={STEP_KIND_OPTIONS}
+              onChange={(value) => updateStep(index, { kind: value })}
+              emptyLabel="Not set"
+            />
+            <TextInput
+              label="Label"
+              mode="outlined"
+              value={step.label ?? ''}
+              onChangeText={(text) => updateStep(index, { label: text || null })}
+              style={styles.field}
+            />
+            <View style={styles.grid}>
+              <View style={styles.gridItem}>
+                <NumberField
+                  label="Target water"
+                  value={step.targetWaterG}
+                  onChange={(value) => updateStep(index, { targetWaterG: value })}
+                  unit="g"
+                />
+              </View>
+              <View style={styles.gridItem}>
+                <NumberField
+                  label="Pour water"
+                  value={step.pourWaterG}
+                  onChange={(value) => updateStep(index, { pourWaterG: value })}
+                  unit="g"
+                />
+              </View>
+              <View style={styles.gridItem}>
+                <NumberField
+                  label="Pour time"
+                  value={step.pourDurationS}
+                  onChange={(value) => updateStep(index, { pourDurationS: value })}
+                  unit="s"
+                  integer
+                />
+              </View>
+              <View style={styles.gridItem}>
+                <NumberField
+                  label="Wait"
+                  value={step.waitAfterS}
+                  onChange={(value) => updateStep(index, { waitAfterS: value })}
+                  unit="s"
+                  integer
+                />
+              </View>
+            </View>
+            <TextInput
+              label="Note"
+              mode="outlined"
+              value={step.note ?? ''}
+              onChangeText={(text) => updateStep(index, { note: text || null })}
+              style={styles.field}
+            />
+          </Card.Content>
+        </Card>
+      ))}
+      <Button
+        mode="outlined"
+        icon="plus"
+        onPress={() => setSteps((current) => [...current, { ...EMPTY_STEP }])}
+        style={styles.addStep}
+      >
+        Add step
+      </Button>
+
+      <Divider style={styles.divider} />
+      <TextInput
+        label="Notes"
+        mode="outlined"
+        value={notes}
+        onChangeText={setNotes}
+        multiline
+        numberOfLines={3}
+      />
+      {error ? (
+        <Text variant="bodySmall" style={{ color: theme.semantic.error }}>
+          {error}
+        </Text>
+      ) : null}
+      <Button
+        mode="contained"
+        onPress={handleSubmit}
+        loading={submitting}
+        disabled={submitting}
+        style={styles.submit}
+      >
+        {initial ? 'Save recipe' : 'Add recipe'}
+      </Button>
+    </KeyboardAwareScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flexGrow: 1,
+    paddingBottom: 32,
+  },
+  field: {
+    marginTop: 12,
+  },
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 4,
+  },
+  gridItem: {
+    width: '50%',
+    paddingRight: 6,
+    marginTop: 12,
+  },
+  divider: {
+    marginVertical: 16,
+  },
+  groupTitle: {
+    marginBottom: 10,
+  },
+  stepCard: {
+    marginBottom: 12,
+  },
+  stepHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  addStep: {
+    marginTop: 4,
+  },
+  submit: {
+    marginTop: 24,
+  },
+});

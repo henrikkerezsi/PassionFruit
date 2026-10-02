@@ -487,8 +487,8 @@ overBudget, goodBudget, delete, deleteContainer
 PassionFruit renames the last four to match its domain while keeping the fields:
 
 ```
-sour,       sourContainer,   onSour,   sourBorder     // an over-extracted brew
-sweet,      sweetContainer,  onSweet,  sweetBorder    // an under-extracted brew
+sour,       sourContainer,   onSour,   sourBorder     // a negative extraction verdict
+sweet,      sweetContainer,  onSweet,  sweetBorder    // a positive extraction verdict
 overBudget -> replaced by   sour
 goodBudget -> replaced by   sweet
 delete, deleteContainer      unchanged
