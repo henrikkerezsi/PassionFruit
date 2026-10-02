@@ -1,0 +1,1696 @@
+# PassionFruit — AI-Assisted Coffee Brewing Journal
+
+PassionFruit is a private, local-first Android app for recording coffee brews,
+learning from them, and being told what to try next. Its defining interaction is
+voice: you talk while you brew and while you drink, and a cloud model turns that
+ramble into a structured, queryable record.
+
+It is the sibling of **Coconut** (`../Coconut`), a personal budget app. The two
+share a family: the same Material Design 3 foundation, the same architecture, the
+same offline-first discipline, the same screen density, and the same way of
+turning a vague intention into a deliberate, judged event. PassionFruit is what
+happens when that design philosophy is pointed at coffee instead of money.
+
+Read `AGENTS.md` for how to build it. Read `theme.md` for how it looks. This
+document defines what it is.
+
+---
+
+## 1. Purpose
+
+PassionFruit solves one problem: the user loves brewing coffee but almost never
+records what they did or how it turned out, so improvement is guesswork.
+
+The app exists to make recording a brew take less effort than not recording it,
+and to turn the accumulated record into a concrete, personalised suggestion for
+the next brew. The loop is:
+
+```
+recommend  ->  brew  ->  record by voice  ->  taste  ->  learn  ->  recommend
+```
+
+Every feature either shortens the distance between a brew and its record, or
+increases the quality of the next suggestion. Anything that does neither is a
+non-goal.
+
+The app is a **personal tool**, not a coffee shop POS, not a roaster's inventory
+system, and not a social network. One user, one device, one local database.
+
+---
+
+## 2. Design Lineage: Coconut
+
+PassionFruit and Coconut are the same family and must read that way to anyone who
+uses both.
+
+### 2.1 What is shared
+
+- Material Design 3 through React Native Paper, with the same theme construction
+  and the same token shapes (`theme.md` §2, §3).
+- The same spacing, radii, elevation and typography scales.
+- The same light/dark/system appearance mechanism.
+- The same architecture: Expo Router file routing, a single local SQLite
+  database as the source of truth, all SQL in `src/database/`, all business logic
+  as pure functions in `src/services/`, all screens presentational.
+- The same evolution of the domain over time: a numbered migration list, never
+  editing a shipped migration.
+- The same "a record is a deliberate event" idea. Coconut refuses to invent a
+  month; PassionFruit refuses to invent a brew.
+- The same five-tab bottom bar with a custom `CustomTabBar`.
+- The same reusable component vocabulary: `StatCard`, `AppDialog`, `EmptyState`,
+  `ScreenFade`, `FadeIn`, `AnimatedNumber`, `LoadingScreen`,
+  `KeyboardAwareScrollView`, `RatingSelector`.
+- The same documentation convention: this file, `AGENTS.md`, `theme.md`,
+  `README.md`, `release-plan.md`.
+
+### 2.2 What is deliberately different
+
+- **Colour.** Coconut is shell brown, sage and dusty blue on warm cream.
+  PassionFruit is passion-fruit orange and berry magenta, with deep teal and
+  golden amber (`theme.md` §4, §5).
+- **The fifth tab.** Coconut's tabs are Overview, Transactions, Statistics,
+  Shared, Settings. PassionFruit's are Brew, Log, Explore, Learn, Settings, plus
+  a persistent microphone FAB that Coconut has no equivalent of.
+- **A network dependency exists, and it is allowed.** Coconut makes zero network
+  requests unless the user opts into sync. PassionFruit requires a cloud AI
+  provider for its signature feature. It is still local-first and still works
+  fully without AI — see §5.7 — but the honest difference is stated here.
+- **There is no month.** Coconut's period is a calendar month. PassionFruit's
+  period is a **brew**, which is a much shorter, much more narrative unit.
+- **No sync in v1** (§13.6). Coconut has Supabase sync and Shared Spaces; those
+  come later for PassionFruit, once the brew schema has stabilised.
+
+### 2.3 What is borrowed as an idea, not as code
+
+Coconut's `RatingSelector` (regret / neutral / good on a three-stop track)
+becomes PassionFruit's taste rating, widened to a 1–5 scale with a 3 midpoint.
+Coconut's "judge each transaction at month close" becomes "judge each brew at
+taste time". Coconut's offline reserve reserve of `month_budget_plan_events`
+becomes PassionFruit's `plan_events`, an audited record of every deliberate
+change to a plan.
+
+---
+
+## 3. The Core Model: A Brew Has a Lifecycle
+
+Coconut's strongest design decision is that a month is planned, judged, and
+closed — it does not simply pass. PassionFruit applies the same idea to a brew.
+
+### 3.1 Plan
+
+A **Plan** is a committed intention: a specific method, brewer, bean, dose, water,
+temperature, grind, and an ordered sequence of steps, optionally with a target
+date. A plan is created by the user directly, from a saved **Recipe**, or by
+accepting a **Recommendation**.
+
+A plan is not a brew. It is what you meant to do. Plans are deliberately created,
+and every change to one is recorded (`plan_events`), so a plan explains itself
+later.
+
+A plan enters one of four states: `planned`, `brewed`, `abandoned`, or `active`
+for the one currently being executed. Starting a voice session from a plan
+attaches that brew to it.
+
+### 3.2 Brew
+
+A **Brew** is what actually happened. It may reference a plan, or stand alone if
+the user just brewed without planning.
+
+A brew holds the physical record: method, brewer, bean, dose, total water, water
+temperature, grinder and grind setting, the observed step sequence, and the total
+time. Values are what occurred, not what was intended. Where a brew references a
+plan, the difference between plan and brew is the primary learning signal.
+
+A brew in progress has an open **voice session** attached to it (§4). A brew is
+completed when the user stops recording and confirms the extracted record.
+
+### 3.3 Taste
+
+A brew has zero or more **Tastings**. Usually one, but brewing the same batch
+twice and tasting both is legitimate, and so is tasting the same cup as it cools.
+A tasting is deliberately separate from a brew because the same brew can be
+judged differently at different temperatures or on different days.
+
+### 3.4 Judging a brew
+
+There are exactly two judgements that are always available, cheapest first:
+
+1. **A verdict.** `liked` / `disliked` / `unsure`. One tap. This is the floor.
+2. **An overall rating.** 1–5, where 3 is neutral, 1 is "never again", 5 is "best
+   I have had". This is the signal the recommender prefers.
+
+Everything else — the full SCA form, attribute levels, flavour tags, free text —
+is optional enrichment. See §10.
+
+### 3.5 Nothing is mandatory
+
+**Enforced invariant.** A brew can be saved with nothing but a method. A tasting
+can be saved with nothing but `` liked ``. Every other field is nullable
+end-to-end: nullable in the domain model, nullable in SQLite, nullable in the
+LLM extraction schema, and rendered as an em-dash or omitted in the UI. The app
+must never block saving a record because a field is empty, and must never
+present an empty required-field validation error for anything other than a
+method and a date.
+
+This invariant exists because the entire product fails if logging a thought
+takes more than a few seconds.
+
+---
+
+## 4. Voice Capture
+
+Voice is the signature feature and the reason anyone would use this app.
+
+### 4.1 The appendable stream
+
+A voice recording is a **session** that can be started, paused, resumed and
+extended as many times as the user likes. Recording a brew may span twenty
+minutes; recording a tasting may happen the next morning. The session holds all
+of it and the UI never forces the user to finish.
+
+A session has: a start time, a current state (`recording`, `paused`, `stopped`,
+`transcribing`, `extracting`, `review`, `committed`, `discarded`), an ordered list
+of **moments**, and a phase marker trail.
+
+**A moment** is one continuous chunk of audio with a start offset in milliseconds
+from the session start, a duration, an audio file path, a `phase`, and — once
+transcribed — a transcript and a confidence value. Pausing ends a moment;
+resuming starts a new one. This is what makes an appendable stream possible
+without corrupting one giant file.
+
+**Enforced invariant.** A moment's audio is written and closed before
+transcription begins. Transcription never operates on a file that is still being
+written. If the app is killed mid-recording, every closed moment survives, and the
+session reopens in `paused`.
+
+### 4.2 Phases
+
+Every moment carries a phase, chosen from a fixed set. The user can switch phase
+with one tap at any time without stopping the recording, and the marker is
+recorded at the current offset.
+
+```
+prep     # grinding, weighing, heating, setup
+brew     # the pour / extraction / press itself
+finish   # drawdown, cleanup, what the bed looked like
+taste    # drinking it, the verdict, descriptors
+note     # anything else: a realisation, a correction, a shopping note
+```
+
+Phases are the LLM's grounding. A sentence in a `brew` moment is far more likely
+to contain a weight or a time than one in a `taste` moment, and the extraction
+prompt is built accordingly. Phase is also what lets the taste ramble happen
+tomorrow morning and still land in the right place.
+
+The default phase on session start is `prep`. The default when resuming after a
+gap longer than the configured threshold (default 5 minutes) is `taste`, because
+that is the overwhelmingly likely case.
+
+### 4.3 Transcription
+
+Two engines, selectable in Settings, both cloud or OS:
+
+- **OpenAI-compatible transcription endpoint.** A base URL, an API key and a
+  model name (default `whisper-1`). Audio is uploaded as multipart. This is the
+  default and works with OpenAI, Groq, and any self-hosted Whisper server.
+- **Android SpeechRecognizer.** Uses the operating system's recogniser. No key,
+  no upload, and genuinely offline for transcription only. Requires Google Play
+  Services and the language model to be present on the device. Documented to be
+  much less reliable on the emulator than on a real phone.
+
+A third engine is **manual**: no transcription at all, the user types. This is
+always available and is the offline fallback.
+
+Transcription language defaults to the device locale and is overridable. Each
+moment stores the engine used and the reported confidence so that the UI can flag
+low-confidence text.
+
+### 4.4 The minimum viable utterance
+
+**Requirement.** If the user says nothing but "I do not like it", the app must be
+able to commit a complete, valid tasting with `verdict = disliked` and nothing
+else. There is no minimum word count, no required field beyond a method for the
+brew, and no nagging for more. A grunt is valid data.
+
+This is a product requirement, not a nicety. The whole point is to lower the cost
+of recording below the cost of not recording.
+
+### 4.5 Audio retention
+
+Audio files are stored under the app's document directory, one per moment, named
+by session and moment id. Retention is user-controlled:
+
+- **Keep audio** (default). Audio is retained so a memo can be re-transcribed
+  later, after a model or language change.
+- **Delete audio after commit.** Audio is deleted once the extraction has been
+  accepted, keeping only the transcript.
+- **Delete audio after transcribe.** Audio is deleted as soon as the transcript
+  exists.
+
+Deleting audio never deletes the transcript or the derived record. The setting is
+per-device, stored in `settings`.
+
+---
+
+## 5. Cloud AI
+
+**There is no local inference. None.** No on-device model, no GGUF file, no
+llama.cpp, no MediaPipe, no LiteRT, no bundled weights. Every AI operation in
+PassionFruit is a network call to a provider the user has configured.
+
+This is a deliberate, explicit constraint. It keeps the APK small, the build
+simple, and the emulator usable for UI work. It is also the single largest
+architectural difference from Coconut, and it is stated in §2.2.
+
+### 5.1 Provider configuration
+
+The app talks to an **OpenAI-compatible** API. Configuration is a single
+`ai_state` singleton row (`id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1)`,
+mirroring Coconut's `sync_state`), holding:
+
+```
+llm_base_url        # e.g. https://api.openai.com/v1
+llm_api_key         # stored locally, never logged, never synced
+llm_model           # e.g. gpt-4.1-mini
+stt_engine          # 'openai-compatible' | 'android' | 'manual'
+stt_base_url
+stt_api_key
+stt_model           # e.g. whisper-1
+stt_language        # BCP-47, null = device locale
+enabled             # integer 0/1
+last_error          # last human-readable failure, surfaced in Settings
+```
+
+This mirrors Coconut's decision to store the user's own Supabase URL and key in
+an in-app `sync_state` singleton. The pattern is intentional.
+
+**Enforced invariants.**
+- Credentials are never hardcoded, never committed, never written to logs, never
+  included in a backup file, and never sent anywhere except the configured base
+  URL.
+- The base URL must use `https`, except for `http://10.0.2.2` and
+  `http://localhost`, which are allowed for local development servers.
+- The default model list contains only names, never keys.
+
+### 5.2 What the LLM does
+
+Four distinct jobs, each with its own prompt and its own validation:
+
+1. **Extraction.** Given a session's phased transcript and the current brew's
+   already-known fields, produce a strict JSON object of candidate field values.
+2. **Narration.** Given a structured recommendation produced by the deterministic
+   engine (§11.3), write one short human paragraph explaining it.
+3. **Insight phrasing.** Given a computed insight (§12), write a title and a
+   one-sentence explanation.
+4. **Assistance.** Given a user's question about technique, plus the relevant
+   method, recipe and recent history, answer from general coffee knowledge. This
+   is the only LLM job that is conversational rather than structured; see §5.9.
+
+The LLM never decides what to recommend. That is computed deterministically; see
+§11.3. The LLM never has write access to the database. It proposes; the user and
+the service layer dispose.
+
+### 5.3 Structured extraction
+
+Extraction uses JSON-schema-constrained output where the provider supports it,
+and a strict "respond with JSON only" prompt with a parse-and-repair pass where it
+does not. The schema is derived from the domain model, so adding a nullable field
+to a model requires adding it to the schema in the same change.
+
+The schema covers, at minimum:
+
+- brew: method, brewer, bean (matched against the catalogue), dose, water, water
+  temperature, total time, grinder, grind setting, and an array of observed steps
+- tasting: verdict, overall rating, each SCA attribute, attribute levels, flavour
+  tags (matched against the vocabulary), and free-text notes
+- session-level: the primary brew method if the transcript implies one, and the
+  user's own words for anything that did not fit
+
+Every extracted value is either a number, a string, a boolean, or null. The
+extraction never invents an entity. If the user says "the usual grinder", the
+extraction returns a reference by name and the service resolves it, or returns
+null.
+
+**Enforced invariant.** Extracted values are *candidates*. They are written to an
+`extraction_results` row, not to the brew or tasting tables. Nothing reaches the
+domain tables until the user accepts the review in §5.6, except in the explicit
+auto-accept path below, and even then every field is recorded as automated in
+`extraction_provenance`.
+
+### 5.4 Clarifying questions
+
+The LLM may return up to a configured maximum (default 3) of clarifying
+questions instead of, or alongside, candidate values. This is the "ask me
+clarifying questions" behaviour, chosen deliberately over silent guessing.
+
+A question is a short piece of text plus the field path it is trying to resolve.
+Questions are answered in the review screen, by tapping one of the offered
+options or by typing. Answers are fed back into a follow-up extraction call, once,
+with the original transcript still in context. The loop is capped at one
+follow-up round so it can never become an interrogation.
+
+Questions appear only for fields the extraction is genuinely uncertain about and
+only for fields the user has not already supplied. A question is never asked
+about a field whose answer does not change any recommendation.
+
+### 5.5 Provenance and the field diff
+
+Every field in the review screen shows where its value came from:
+
+```
+from your speech   # the LLM extracted it and is confident
+inferred           # the LLM filled it from a default or from context
+you said earlier   # already present on the brew before this session
+empty              # no value; the user may fill it
+```
+
+The review screen shows the diff against the previous state of the record: what
+was added, what changed, what was left alone. This is the check against a misread
+weight or temperature, and it is mandatory. It is the reason a wrong extraction
+costs the user nothing.
+
+The user can accept all, accept individually, or edit any value inline. Accepted
+values are tagged with their source in `extraction_provenance`.
+
+### 5.6 Auto-accept
+
+An optional setting. When on, an extraction with no clarifying questions and no
+low-confidence fields is applied directly and the user is shown a toast with an
+undo affordance rather than a review screen. When off — the default — the review
+screen always appears.
+
+Auto-accept never applies to a field the model marked low-confidence, and never
+applies when the extraction would overwrite a user-entered value.
+
+### 5.7 Failure, degradation, and the offline path
+
+The app works with no provider configured, with no network, and with a provider
+that is down. None of these states is an error state.
+
+- **No provider configured.** The record button still works and audio is still
+  captured, but the review screen says transcription is unavailable and offers
+  manual entry. Every screen in the app remains reachable.
+- **Transcription fails.** The moment keeps its audio and is marked
+  `transcript_failed` with a retry action and a "type it instead" action.
+- **Extraction fails.** The transcript is shown, the manual form is shown, and a
+  retry action is offered. Nothing the user said is lost.
+- **No network.** Same as failure, detected before the request where possible so
+  the user is not left waiting.
+
+**Enforced invariant.** A network or provider failure can never destroy recorded
+audio, a transcript, a brew, or a tasting. Every AI operation is additive. The
+manual fallback form must expose every field the extraction schema can fill, so
+that "the AI is down" degrades the app to a perfectly usable manual journal
+rather than disabling it.
+
+### 5.8 Cost and rate discipline
+
+- Transcription is batched per moment, not per utterance, and audio is compressed
+  before upload.
+- Extraction runs once per session commit, plus at most one follow-up round for
+  clarifying questions.
+- A session's transcript is never re-sent for an extraction that has already
+  succeeded.
+- The app records token usage per `extraction_run` where the provider reports it,
+  and Settings shows a running total and an estimated spend. It does not hard-cap
+  spend in v1; it makes it visible.
+- Assistance (§5.9) runs only when the user asks, never on a schedule, and its
+  usage is added to the same running total.
+
+### 5.9 Assistance and technique coaching
+
+Learning from the user's own brews is necessary but not sufficient. A beginner can
+repeat the same avoidable mistake fifty times and the model will only learn that
+the mistake is "their style". PassionFruit therefore lets the user ask for
+external help directly, and lets the engine act on an obvious flaw before it
+spends dozens of brews discovering it empirically.
+
+**Ask for help.** A single entry point — reachable from the Explore tab, from a
+recipe, and from a recommendation or brew detail — opens a short question box.
+The user can type or speak a question such as:
+
+```
+What is a sensible flow rate when pouring a V60?
+My V60 always finishes in 1:40 — what am I doing wrong?
+Should I stir the crust on a French press?
+```
+
+The request sends the question, the method, the currently selected recipe, and a
+compact summary of the user's recent brews for that method. The LLM answers from
+general coffee knowledge, and the answer is shown as **advisory text**, clearly
+labelled as the provider's opinion rather than a fact the app has measured.
+
+**Adopting advice.** An answer can be turned into a starting point with one
+action: "use this as a plan". That creates a normal Plan (§3.1) pre-filled from
+whatever parameter changes the answer implies, with the advice text saved in the
+plan's notes. Advice is never written to a recipe, plan or brew silently, and the
+LLM still never writes to the database directly. If the answer names explicit
+knob values the extraction-style schema can parse, they arrive as *candidates* and
+go through the same review and provenance machinery as §5.6.
+
+**Flaw detection.** An assistance request may conclude that a specific, known-bad
+technique is present — for example a pour-over that finishes far below any
+plausible time, no bloom at all, water far outside a method's sensible range, or a
+grind that cannot be reached on the selected grinder. When it does, the answer
+carries a structured `flaw` block naming the knob, the observed value, the
+healthy range and why it matters. That block, not the prose, is what the engine
+consumes in §11.7.
+
+**Built-in guidance works offline.** The nine methods ship with static technique
+notes (healthy time, temperature, ratio, bloom and pour ranges). The "what is
+normal for this method?" layer therefore works with no provider configured; only
+the free-form conversational answer needs the network. When assistance is
+unavailable, the app says so and still shows the built-in ranges.
+
+**Not stored by default.** Assistance exchanges are ephemeral: the question and
+answer are not persisted, so the assistant does not become a chat log and cannot
+leak into a backup. Only the plan or recipe the user intentionally creates from an
+answer is stored, with the advice text in its notes.
+
+**Enforced invariants.**
+- Assistance never mutates the database. It returns text and, optionally, a
+  structured `flaw` block and candidate values; the user and the service layer
+  dispose.
+- An advisory answer is always visually distinct from a measured recommendation.
+  The app never fabricates a citation or attributes an LLM opinion to the user's
+  own data.
+- The assistant receives only brewing context (method, recipe knobs, ratings,
+  bean attributes). It is never sent the raw audio, the full transcript archive,
+  or any credential.
+
+---
+
+## 6. Coffee: The Bean Catalogue
+
+PassionFruit maintains a full catalogue of the coffee itself. This is where the
+strongest preference signal lives: it is far more useful to learn "you prefer
+washed Ethiopian light roasts at 1:16" than "you pressed a button 40 times".
+
+A **Bean** record is one bag or one lot:
+
+```
+id, uuid, name, roaster_id, 
+origin_country, origin_region, farm, producer, varietal, process, altitude_m,
+roast_level, roast_date, purchased_date, opened_date, finished_date,
+bag_weight_g, remaining_weight_g, price_cents, currency,
+notes, is_active, sort_order, created_at, updated_at, deleted
+```
+
+- `process` is a string-literal union: `washed`, `natural`, `honey`, `anaerobic`,
+  `carbonic`, `wet-hulled`, `experimental`, `unknown`. It is stored as TEXT with
+  a `CHECK` constraint, following Coconut's migration-14 idiom.
+- `roast_level` is `light`, `medium-light`, `medium`, `medium-dark`, `dark`,
+  `unknown`.
+- `remaining_weight_g` is decremented from the brew's dose when a brew is
+  committed against the bean and the bean is active. It is a convenience, not an
+  accounting system: it can be corrected by hand at any time, and a mismatch never
+  blocks anything.
+- `roast_date` drives the freshness nudges in §15. It is the single most useful
+  date in the whole app.
+
+A **Roaster** is `id, name, location, url, notes, active, sort_order`.
+
+Beans are deactivated (`is_active = 0`), never silently deleted while brews
+reference them. Deleting a bean that has brews is a hard delete only after an
+explicit confirmation, and the brews keep a denormalised `bean_name_snapshot` so
+history never becomes unreadable.
+
+---
+
+## 7. Equipment
+
+### 7.1 Brewers
+
+A single `brewers` table holds everything that is not a bean, distinguished by
+`kind`:
+
+```
+kind: 'dripper' | 'kettle' | 'scale' | 'grinder' | 'press' | 'filter'
+    | 'carafe' | 'portafilter' | 'moka' | 'cup' | 'other'
+```
+
+Columns: `id, uuid, name, kind, manufacturer, model, capacity_ml, material,
+notes, is_active, sort_order, created_at, updated_at, deleted`.
+
+Every method declares which brewer `kind` it expects, so selecting "V60" filters
+the brewer picker to `dripper` and selecting "Espresso" filters it to
+`portafilter`. This is a UI convenience backed by data, not a constraint: the
+picker always offers "other".
+
+### 7.2 Grinders and grind settings
+
+Grinders live in `brewers` with `kind = 'grinder'`. Because grind is method- and
+grinder-specific, and because "18 clicks on a C40" and "setting 7 on an Ode" are
+not comparable, grind is recorded as a reference plus a value:
+
+```
+grind_settings
+  id, uuid, brewer_id, name, selection_label, step_count, is_zero_based,
+  notes, created_at, updated_at, deleted
+```
+
+A `grind_setting` is a mnemonic the user defines once — "Ode Gen 2, 0–11" — and a
+brew records:
+
+```
+grinder_id          # FK to brewers
+grind_setting_id    # FK to grind_settings, nullable
+grind_value         # numeric, nullable
+grind_unit          # 'clicks' | 'setting' | 'microns' | 'notch' | 'unknown'
+```
+
+**Enforced invariant.** The recommender may only reason about `grind_value`
+within a single `(grinder_id, grind_setting_id, grind_unit)` group. It must never
+compare a click count to a micron value. Grind is the only knob with this
+restriction; dose, water, ratio, temperature and time are absolute and comparable
+globally.
+
+### 7.3 Scales and kettles
+
+Recorded for completeness and for the "what equipment do you own" question. The
+app does not connect to them. Bluetooth scales and smart kettles are an explicit
+non-goal for v1 (§23).
+
+---
+
+## 8. Brewing Methods
+
+### 8.1 The nine methods
+
+PassionFruit natively supports exactly these nine, each with its own structured
+recipe shape:
+
+```
+v60          # V60 / cone pour over
+chemex       # Chemex
+kalita       # Kalita Wave / flat-bed pour over
+french-press # immersion, metal or cloth filter
+aeropress    # pressure-assisted immersion
+clever       # Clever Dripper / immersion-with-a-valve
+cold-brew    # long cold immersion
+espresso     # pump espresso
+moka         # stovetop Moka pot
+```
+
+Each method has: an id, a display name, a family (`pour-over`, `immersion`,
+`pressure`, `cold`), the brewer `kind` it expects, whether it supports pressure,
+whether it supports a grinder in the brew path, and a default step template.
+
+A `custom` method is **not** in v1. Adding a tenth method is a code change, a
+migration and a `release-plan.md` entry, not a user action. This is deliberate:
+the structured shapes are the point, and a free-form method would be a
+half-feature. Users who brew something else record it as the closest supported
+method and use the `note` phase.
+
+### 8.2 Recipe core parameters
+
+Every method shares a common core, stored on `recipes` and copied onto `plans`
+and `brews`:
+
+```
+dose_g              number, nullable
+water_total_g       number, nullable
+water_temp_c        number, nullable
+grinder_id          FK, nullable
+grind_setting_id    FK, nullable
+grind_value         number, nullable
+grind_unit          text, nullable
+expected_total_time_s  integer, nullable
+```
+
+The **ratio** is never stored. It is always derived: `water_total_g / dose_g`. It
+is displayed, sorted and compared, but it is a function of two stored values and
+storing it would create a second source of truth.
+
+### 8.3 The step model
+
+Steps are ordered rows. A step describes one action in the brew.
+
+```
+step_index          integer, 0-based, unique per parent
+kind                text, from the union below
+label               text, nullable, user-facing custom name
+target_water_g      number, nullable, cumulative water after this step
+pour_water_g        number, nullable, water added by this step
+pour_duration_s     integer, nullable
+wait_after_s        integer, nullable
+agitation_count     integer, nullable
+agitation_kind      'stir' | 'swirl' | 'tap' | 'none', nullable
+temperature_c       number, nullable, for steps that change it
+note                text, nullable
+```
+
+The step-kind union, which covers all nine methods:
+
+```
+dose, grind, rinse, preheat, fill_water, fill_grounds, add_water,
+bloom, pour, stir, swirl, tap, steep, break_crust, skim, press,
+assemble, heat, plate, drain, extract, stop, wait, custom
+```
+
+Only `pour`-family steps carry water targets. Only `steep` carries a long
+`wait_after_s`. Only pressure methods use `extract` and `stop`. Validation is
+per-method (§8.4), and a step kind that is nonsensical for a method is rejected by
+the service layer, not merely hidden in the UI.
+
+**Enforced invariant.** `target_water_g` is cumulative and monotonic
+non-decreasing across a step list. `pour_water_g` is the delta. Both are stored,
+and their consistency is validated on write. The UI always edits one and derives
+the other so the user never has to think about which they are looking at.
+
+### 8.4 Per-method step shapes
+
+This is the specification the extraction schema, the validators, the built-in
+recipe templates and the UI step editor all read from.
+
+**v60 — pour over cone**
+
+```
+bloom (pour, target ~2–3x dose, duration, wait 30–45s)
+pour  (2–4 pulses, each with target and duration)
+swirl (optional, near the end)
+```
+
+Canonical built-in: 15 g dose, 250 g water, 93 °C, 1:16.7, a 45 g bloom with a
+45 s wait, then pours to 150 g and 250 g, total 2:45.
+
+**chemex — thick-filter pour over**
+
+```
+rinse (paper + carafe, warm)
+bloom (longer wait than v60, coarser grind)
+pour  (fewer, larger pulses)
+```
+
+Canonical built-in: 30 g dose, 500 g water, 94 °C, 1:16.7, a 60 g bloom with a
+45 s wait, two large pours, total 4:00.
+
+**kalita — flat-bed pour over**
+
+```
+rinse
+bloom (short)
+pour  (multiple small, even pulses)
+```
+
+Canonical built-in: 20 g dose, 320 g water, 93 °C, 1:16, a 40 g bloom with a 40 s
+wait, four even pulses, total 3:00. The flat bed is the identity of this method,
+so the step template defaults to more, smaller pulses than v60.
+
+**french-press — immersion**
+
+```
+add_water (all at once)
+steep     (4:00, with the full water)
+break_crust (stir)
+skim
+press
+```
+
+Canonical built-in: 30 g dose, 500 g water, 93 °C, 1:16.7, a 4:00 steep, a
+crust break, a skim, a slow press. Grind is coarse; the step editor defaults the
+steep to `wait_after_s = 240`.
+
+**aeropress — pressure-assisted immersion**
+
+```
+rinse / preheat (optional, standard vs inverted)
+dose
+add_water
+steep     (1:00–2:00)
+stir
+press     (slow, 20–30 s)
+```
+
+Canonical built-in: 15 g dose, 220 g water, 92 °C, 1:14.7, a 1:30 steep, a stir,
+a 30 s press. The method carries a `style` note in the recipe's `label`:
+`standard` or `inverted`.
+
+**clever — immersion with a valve**
+
+```
+rinse
+add_water
+steep     (2:00–2:30, valve closed)
+drain     (open the valve)
+```
+
+Canonical built-in: 20 g dose, 330 g water, 93 °C, 1:16.5, a 2:30 steep, then
+drain. The `drain` step is the defining step and the validator requires it.
+
+**cold-brew — long cold immersion**
+
+```
+combine   (water + grounds)
+steep     (hours, not minutes)
+filter
+```
+
+Canonical built-in: 100 g dose, 1000 g water, 20 °C, 1:10, a 16:00:00 steep, a
+filter step. Because the steep is measured in hours, this method's `wait_after_s`
+values exceed the integer range of a 32-bit seconds field only at extreme
+durations; the column is INTEGER and the validator caps a single steep at 48
+hours.
+
+**espresso — pump espresso**
+
+```
+dose
+grind
+distribute
+tamper
+extract   (yield target, time target)
+stop
+```
+
+Canonical built-in: 18 g dose, 36 g yield (the `extract` step's
+`target_water_g` is the yield in grams), 93 °C, a 25–30 s extraction. Espresso is
+the only method where `dose_g` and `water_total_g` are not the input pair; the
+input pair is dose and **yield**, and `water_total_g` is set equal to the yield
+for storage consistency.
+
+**moka — stovetop**
+
+```
+preheat
+fill_water
+fill_grounds
+assemble
+heat
+plate     (remove from heat / cool the base)
+stop
+```
+
+Canonical built-in: 18 g dose, 150 g water, no temperature control (recorded as
+null), a medium-fine grind, a heat step and an early stop. Moka is the only
+method where `water_temp_c` is legitimately left null, because the user does not
+control it.
+
+### 8.5 Canonical built-in recipes
+
+The nine canonical recipes above ship as `recipes` rows with `is_builtin = 1` and
+`source = 'builtin'`. They are the answer to "I have never brewed this method
+before". They are inserted by a migration, are read-only in the UI, and are
+superseded by any user recipe the user creates for the same method. A built-in
+recipe can be "adopted": copied into a user-owned recipe with `source = 'own'`
+and `parent_recipe_id` pointing at the built-in.
+
+Built-ins exist precisely so that the Explore tab can offer something genuinely
+new rather than only variations of what the user has already done.
+
+### 8.6 Adding a method later
+
+Adding a method is a numbered migration that (a) inserts the method into the
+`methods` reference data, (b) inserts its canonical recipe and steps, and (c)
+requires a matching entry in the extraction schema and the per-method validator.
+No existing migration is touched.
+
+---
+
+## 9. Recipes
+
+A **Recipe** is a saved, reusable intention. It is the unit of "I know how I like
+to brew this" and the unit the recommender varies.
+
+```
+recipes
+  id, uuid, name, method_id, brewer_id, bean_id,
+  source            'builtin' | 'own' | 'recommendation'
+  parent_recipe_id  FK to recipes, nullable, for lineage
+  is_builtin        integer 0/1
+  dose_g, water_total_g, water_temp_c, grinder_id,
+  grind_setting_id, grind_value, grind_unit, expected_total_time_s
+  notes, created_at, updated_at, deleted
+```
+
+plus `recipe_steps`, identical in shape to `plan_steps` and `brew_steps`.
+
+A recipe is never mutated in place by the recommender. A recommendation that is
+adopted as a recipe creates a **new** recipe with `parent_recipe_id` set to its
+origin. This is what makes a lineage tree possible later: "this recipe came from
+that one, two grams finer each time".
+
+---
+
+## 10. Tasting
+
+### 10.1 Required minimum
+
+Nothing is required. The floor is a `verdict` on a tasting, and even that can be
+absent if the user simply wants to log that a brew happened.
+
+The layered model, cheapest first:
+
+```
+1. verdict            liked | disliked | unsure
+2. overall_rating     1..5, 3 = neutral
+3. attribute levels   acidity | sweetness | body | bitterness | finish,
+                      each low | medium | high
+4. SCA scores         ten attributes, each 1..10
+5. flavour tags       selected from the vocabulary
+6. free text          the user's own words, in full
+```
+
+Each layer is independently optional and independently useful. The recommender
+weights them in this order.
+
+### 10.2 The SCA form
+
+The full Specialty Coffee Association cupping form is supported field-for-field:
+
+```
+sca_aroma
+sca_flavour
+sca_aftertaste
+sca_acidity
+sca_body
+sca_balance
+sca_uniformity
+sca_clean_cup
+sca_sweetness
+sca_overall
+```
+
+Each is `INTEGER` in the range 1–10, nullable, with a `CHECK` constraint
+following Coconut's migration-14 idiom:
+
+```sql
+CHECK (sca_aroma IS NULL OR (sca_aroma BETWEEN 1 AND 10))
+```
+
+**Enforced invariant.** The SCA form is never required, never prompted by
+default, and never blocks a save. It is reached by an explicit "Full cupping
+form" expansion on the tasting screen. The UI must not visually imply that the
+form is the expected input.
+
+### 10.3 Attribute levels
+
+The five attribute levels (`low` / `medium` / `high`) are a fast middle ground
+between one tap and the full form. They are the model of the shape of a cup and
+are what most of the automated insight is built from, because they are cheap
+enough that the user will actually fill them in.
+
+### 10.4 Flavour vocabulary
+
+A fixed, seeded vocabulary of flavour descriptors, grouped by category:
+
+```
+fruit, floral, sweet, nutty_cocoa, spice, roasted, green_vegetative,
+sour_fermented, chemical, other
+```
+
+Each tag has a stable id, a display name and a category. The vocabulary is seeded
+by migration and is append-only: a user may add a tag to the `other` category but
+may never delete or rename a seeded tag, because insights are keyed on tag ids.
+Tags are attached through `tasting_flavour_tags`, a join table.
+
+The extraction schema is allowed to return only tags that exist in the
+vocabulary. An unrecognised descriptor goes into the tasting's free text, never
+into the tag set. This keeps the vocabulary closed and the insights joinable.
+
+### 10.5 Multiple tastings of one brew
+
+A brew may have many tastings. The UI shows the first as primary and the rest
+beneath it with their timestamps. Aggregation to a single per-brew rating uses:
+
+- the **latest** tasting's `overall_rating` for display, because tastes change
+  and the most recent is what the user remembers; and
+- the **mean** of all non-null `overall_rating` values for the recommender, so
+  that re-tasting is not confused with a second data point.
+
+This distinction is enforced in `services/tasting-service.ts` and is unit tested.
+
+---
+
+## 11. Recommendations
+
+### 11.1 Three modes
+
+The user picks one of three named modes, not a slider. The mode is an explicit
+input to the engine and is recorded on every recommendation.
+
+```
+safe         # the best-proven recipe, tiny adjustments only
+curious      # moderate variations in one or two knobs
+adventurous  # large swings, unproven directions, built-in recipes welcome
+```
+
+The mode translates into three concrete parameters passed to the engine:
+
+```
+max_knobs_changed   safe: 1   curious: 2   adventurous: 4
+max_relative_delta  safe: 5%  curious: 20% adventurous: 50%
+exploration         safe: 0   curious: 0.15 adventurous: 0.45
+```
+
+`exploration` is the probability weight given to arms with little or no evidence,
+implemented as a Thompson-sampling temperature in §11.3. In `safe` mode the
+engine is deterministic: the same history always yields the same suggestion.
+
+**Enforced invariant.** Hard physical bounds are applied after, never before,
+the exploration choice, and apply in every mode. No mode can produce a ratio
+below 1:5 or above 1:30, a water temperature outside 4–100 °C, a dose below 3 g,
+a bloom longer than 5 minutes for a hot method, or a grind value outside the
+range declared on the selected `grind_setting`. Adventure affects how far the
+engine wanders, never whether the result is physically real.
+
+### 11.2 What the engine may change
+
+All of the following, subject to the mode's bounds:
+
+- **Continuous physical knobs:** dose, total water, ratio, water temperature,
+  expected total time, bloom time, bloom water, number of pours, per-pour water
+  and duration, agitation count.
+- **Pour structure:** add, remove, or reorder a step, and change a step's target
+  or duration.
+- **Bean or method switch:** recommend a different active bean, or a different
+  method entirely.
+- **Anything, LLM-chosen:** the engine may propose a combination that no single
+  rule would have produced, by sampling from the exploration distribution.
+
+**Recommendation source preference.** The engine always prefers an anchor in the
+user's own history. A built-in recipe (§8.5) is only proposed when the user's
+history for that method is too thin to anchor on (fewer than three rated brews
+for that method), when the mode is `adventurous` and the built-in is materially
+different from anything tried, or when the user explicitly asks for something new
+from the Explore tab.
+
+### 11.3 How the suggestion is computed
+
+Deterministic, pure, testable TypeScript in `src/services/recommendation-service.ts`.
+The LLM is not involved in any step of this.
+
+**Flaw scan runs first.** Before any suggestion is computed, the engine scans for
+an obvious flaw (§11.7). If one is found, the result is a correction and the steps
+below are skipped until the flaw is cleared. This is what stops the engine from
+optimising an arm that is simply broken.
+
+**Step 1 — candidate pool.** Gather every brew with an `overall_rating`, grouped
+by method. For the target method, if there are fewer than three rated brews,
+switch to the built-in branch (§11.2).
+
+**Step 2 — the taste model.** For each knob that varies within the candidate set,
+fit a small Bayesian linear model of `overall_rating` against the standardised
+knob value, scoped to the method. The result is, per knob: a signed **sensitivity**
+(how much the rating moves per standard deviation of the knob) and a **confidence**
+derived from the number of observations and the residual variance. This is the
+statistical core and it is unit-tested against fixture data with known answers.
+
+Knobs with fewer than three observations, or with near-zero variance, are
+excluded with a recorded reason.
+
+**Step 3 — the best-known point.** The candidate with the highest smoothed rating,
+where smoothing is a Bayesian average toward the method's mean rating so that a
+single lucky 5 does not dominate a consistent 4.4. This is the `safe` answer.
+
+**Step 4 — the proposal.** Perturb the best-known point along the highest-
+confidence, positive-sensitivity knobs, by an amount that respects the mode's
+`max_relative_delta` and `max_knobs_changed`. For `adventurous`, additionally
+allow arms with low evidence, weighted by the Thompson sample, which is how the
+engine tries something it does not yet understand.
+
+**Step 5 — the diffs.** Every changed knob becomes a `recommendation_diffs` row
+with the current value, the proposed value, the sensitivity and the confidence.
+A recommendation with an empty diff list is valid and means "do exactly this
+again", which is a legitimate and common answer.
+
+**Step 6 — physical validation.** Apply the hard bounds of §11.1. A proposal that
+fails is clamped and the clamp is recorded, or, where clamping would produce
+nonsense, the proposal is discarded and step 4 is repeated with the next knob.
+
+**Step 7 — narration.** The structured recommendation is handed to the LLM, which
+returns one short paragraph. If the LLM fails or is unconfigured, a deterministic
+template builds a sentence from the diffs. The recommendation is valid without
+any LLM.
+
+### 11.4 The rationale
+
+Every recommendation stores a structured rationale:
+
+```
+base_brew_id       the brew this generalised from
+base_recipe_id     if it generalised from a recipe instead
+sensitivities      [{ knob, sign, magnitude, confidence, n }]
+evidence_count     how many rated brews backed it
+mode               safe | curious | adventurous
+constraints_hit    any clamp that was applied
+flaw               { knob, observed, healthy_min, healthy_max, reason } | null
+flaw_first         integer 0/1, true when this is a correction, not a variation
+flaw_source        'canonical' | 'history' | 'assistance' | null
+```
+
+The Learn tab can therefore explain *why* the app believes what it believes, and
+the user can inspect it. A recommendation that cannot state its evidence is a bug.
+
+### 11.5 From suggestion to plan
+
+A recommendation has one of: `proposed`, `accepted`, `declined`, `brewed`,
+`superseded`, `expired`.
+
+Accepting a recommendation creates a **Plan** pre-filled from it, with the
+recommendation id recorded. The plan is then editable, because the user always has
+the last word; any edit is recorded as a `plan_event`. Brewing from that plan links
+the resulting brew back to both the plan and the recommendation, which is what
+closes the loop and lets the engine learn whether its advice worked.
+
+Declining requires no reason, but the UI offers a fixed set ("not today", "out of
+beans", "grinder is set differently", "just not that") which is stored as
+`declined_reason`. Declines feed the model as weak negative evidence and are
+excluded from rating statistics.
+
+**Enforced invariant.** A plan may be edited freely. A brew may never be edited
+to match a plan. The whole value of the system is the gap between the two.
+
+### 11.6 History anchoring and built-ins
+
+Stated once more because it is easy to get wrong: the recommendation engine's
+default anchor is the user's own highest-rated brew for that method. Built-ins
+are the fallback for thin history and the fuel for `adventurous` mode. The Explore
+tab is where built-ins are surfaced deliberately. The Brew tab's recommendation
+is always history-anchored where history exists.
+
+### 11.7 Flaw-first priority
+
+A recommender that only ever explores within the space the user has already
+visited will happily tune a fundamentally broken technique. PassionFruit makes
+one exception to explore-versus-exploit: if an **obvious flaw** is present, the
+engine corrects it first, in every mode, before it proposes anything else.
+
+An obvious flaw is a technique that is not a matter of taste, established from one
+of three sources:
+
+```
+canonical    the current recipe for the method is outside the built-in healthy
+             range for that method (time, temperature, ratio, bloom, pour time),
+             or omits a step the method requires (no bloom on a pour-over, no
+             press on a French press, no steep on a cold brew)
+history      a systematically harmful pattern in the user's own record, of the
+             shape §12.4 detects: one knob consistently pushed in a direction
+             that keeps lowering the rating, with enough evidence to be confident
+assistance   the user explicitly asked for help (§5.9) and the answer returned a
+             structured flaw block
+```
+
+The engine returns a **correction** recommendation, distinct from a variation:
+
+- It is emitted in every mode, including `safe`, and ignores `exploration`.
+- It changes the **minimum** number of knobs needed to bring the brew back inside
+  the healthy range, not the largest swing the mode would otherwise allow.
+- Its rationale names the flawed knob, the observed value, the healthy range and
+  the reason, and sets `flaw_first`. It cites `flaw_source`.
+- It does not permanently override the user. The user may decline it, edit it, or
+  dismiss the flaw ("I know, I like it that way"), which records the dismissal for
+  that scope and stops it resurfacing immediately.
+
+**Evidence floor.** A flaw must be defensible. `canonical` flaws need only the
+shipped method bounds and are fully deterministic. `history` flaws require the
+confidence threshold of §12.4. `assistance` flaws require an explicit user request
+and are always shown with the assistant's reasoning, because the provider's
+opinion is not the app's own measurement. A flaw is never inferred silently from
+an LLM's unsolicited opinion.
+
+**Clearing.** Once a correction is brewed, or the flaw is dismissed, the engine
+returns to its normal steps. The whole point is that the user learns or fixes the
+problem in one or two brews instead of fifty.
+
+---
+
+## 12. Learning About You
+
+The **Learn** tab is not charts for their own sake. It answers four questions and
+nothing else.
+
+### 12.1 Grind sensitivity
+
+"Does a finer grind help you, and by how much?" Computed from the per-knob
+regression of §11.3, scoped to a method or to a bean/process group. Rendered as a
+signed bar, with the sample count and a confidence band shown so a conclusion
+drawn from three brews is not presented with the same weight as one from forty.
+
+### 12.2 Time sensitivity
+
+The same computation for total time and for bloom time. These two are reported
+separately because they move extraction for different reasons and the user can act
+on them independently.
+
+### 12.3 Taste profile
+
+Aggregations of what the user actually likes, from the highest-rated tastings:
+
+- which origins, varietals, processes and roast levels score highest, with
+  sample counts
+- which flavour tags co-occur with the highest ratings
+- which attribute levels (acidity, body, sweetness, bitterness, finish) are the
+  signature of a high-rated cup
+
+Every one of these carries its `n`. A preference drawn from two brews is labelled
+as a hunch, not a conclusion.
+
+### 12.4 Habitual mistakes
+
+Where the user's own record shows a consistent negative pattern. Examples of the
+*shape* of these findings, not a fixed list:
+
+- a knob the user repeatedly pushes in a direction that keeps lowering the rating
+- a bean or process the user keeps buying and keeps rating below their own average
+- brews logged with no temperature, or with a stale bean, that rate systematically
+  lower
+- a method where the user's ratings are consistently worse than their other
+  methods, suggesting a technique problem rather than a taste preference
+
+A habitual-mistake finding that passes the confidence floor does not stay a card
+in Learn: it becomes a flaw-first correction in the engine (§11.7), so the user is
+nudged to fix it rather than continuing to brew around it.
+
+### 12.5 Blind spots
+
+Methods, beans, processes and flavour directions the user has barely tried, ranked
+by how much information a first attempt would add to the model — that is, by how
+much variance remains unexplained in an otherwise well-understood space. This is
+what feeds the Explore tab and the `adventurous` mode.
+
+### 12.6 Confidence and evidence
+
+Every insight carries `score`, `confidence`, `evidence_json` and `expires_at`. An
+insight with low confidence is rendered with hedged language and a smaller visual
+weight. An insight is recomputed and replaced on a schedule or when new brews
+arrive, and a dismissed insight is remembered as dismissed for its scope so it
+does not resurface immediately.
+
+---
+
+## 13. Data Model
+
+### 13.1 Table inventory
+
+**Reference and configuration**
+
+```
+settings            key/value, plus updated_at
+ai_state            singleton, id=1, provider configuration
+app_prefs           tutorial seen, update prefs, notification prefs
+methods             the nine methods, seeded reference data
+flavour_tags        the seeded descriptor vocabulary
+```
+
+**Coffee and equipment**
+
+```
+roasters
+beans
+brewers             everything with a kind, including grinders
+grind_settings
+```
+
+**Recipes and plans**
+
+```
+recipes
+recipe_steps
+plans
+plan_steps
+plan_events         audited changes to a plan
+recommendations
+recommendation_diffs
+```
+
+**Voice and AI provenance**
+
+```
+voice_sessions
+voice_moments
+phase_markers
+extraction_runs
+extraction_results
+extraction_questions
+extraction_provenance
+```
+
+**The record**
+
+```
+brews
+brew_steps
+tastings
+tasting_flavour_tags
+```
+
+**Derived and delivered**
+
+```
+insights
+reminders
+```
+
+No sync tables in v1. Migration 1 reserves nothing for sync; when sync arrives it
+follows Coconut's additive pattern (uuid + updated_at on every sync-facing table,
+then outbox/tombstone tables) in a later numbered migration. Because every table
+already carries `uuid` and `updated_at` from migration 1, that retrofit is cheap.
+This is a deliberate difference from Coconut, where the sync columns were added
+in migration 7: PassionFruit pays the small schema cost up front so the door stays
+open.
+
+### 13.2 Conventions
+
+Identical to Coconut except where noted:
+
+- Surrogate primary keys: `id INTEGER PRIMARY KEY AUTOINCREMENT`, except for
+  natural-key tables (see below).
+- **Every domain table carries `uuid TEXT` from migration 1** plus a `UNIQUE`
+  index, and `updated_at TEXT`. This is for future sync and for stable references
+  in LLM payloads, so that a recommendation can name a brew without naming a
+  device-local integer.
+- Booleans are `INTEGER NOT NULL DEFAULT 0` / `DEFAULT 1`; soft delete is
+  `deleted INTEGER NOT NULL DEFAULT 0`.
+- Money, where it exists (bean purchase price), is integer cents, never a float.
+- All physical measurements are stored in metric base units and are **REAL**:
+  grams, millilitres, degrees Celsius, seconds. Coffee measurements are genuinely
+  continuous and rounding them to integers loses real precision. This is a
+  deliberate deviation from Coconut's integer-cents rule, which exists for money
+  and only for money.
+- Enums are `TEXT` with a `CHECK (col IS NULL OR col IN (...))` constraint.
+- Nullable is the bare absence of `NOT NULL`. Nothing is non-nullable except
+  identity, timestamps and foreign keys.
+- Timestamps are ISO-8601 with milliseconds and `Z`, via
+  `strftime('%Y-%m-%dT%H:%M:%fZ','now')`, from migration 1. Dates are
+  `YYYY-MM-DD`. Durations are integers in seconds. Audio offsets are integers in
+  milliseconds.
+- Indexes are named `idx_<table>_<purpose>`.
+- Foreign keys are declared with `ON DELETE CASCADE` for true children
+  (`recipe_steps` under `recipes`) and `ON DELETE SET NULL` for references that
+  must survive (`brews.plan_id`, `brews.bean_id` where history matters).
+- Reference-data tables use natural keys and are seeded by migration:
+  `methods (id TEXT PRIMARY KEY)`, `flavour_tags (id TEXT PRIMARY KEY)`.
+
+### 13.3 Derived, never stored
+
+The following are **always computed** and never written to a column:
+
+```
+ratio               water_total_g / dose_g
+brew_duration       sum of step durations, or the measured time
+extraction_verdict  sour | balanced | sweet, inferred from attribute levels
+preference_group    origin/process/roast buckets used by insights
+```
+
+Any of these found as a stored column, in any table, is a bug.
+
+---
+
+## 14. Main Screens
+
+Five tabs and one persistent action. Every tab is reachable at all times,
+including with no provider configured and no data.
+
+### Brew (home)
+
+The default tab. Top to bottom:
+
+- A brand row: the PassionFruit logo glyph and wordmark, matching Coconut's
+  Overview brand row.
+- A **Next up** card. Either the current recommendation (with its mode chip and
+  one-line rationale) or, if none exists, a prompt to brew. Tapping opens the
+  recommendation or, if there is none, the method picker.
+- A **current session banner** if a voice session is open, showing the elapsed
+  time, the current phase, and a resume action. Absent otherwise.
+- **Recent brews** — the last few, each showing method, bean, rating and relative
+  day, tapping through to the brew detail.
+- Two `StatCard` tiles: brews logged this week, and the average rating of the
+  last ten brews. Both are absent rather than zero when there is no data.
+- A **Beans in rotation** card, showing active beans with their days-since-roast,
+  taps through to the bean detail.
+
+The persistent microphone FAB floats over every tab.
+
+### Log
+
+A reverse-chronological list of brews, grouped by day with a sticky day header,
+mirroring Coconut's transaction list. Each row: time, method icon, bean name,
+dose→water or dose→yield, rating. Filter chips for method, bean, rating, and
+whether a plan was followed. A search field over bean name and tasting notes.
+Tapping a row opens the brew detail.
+
+### Explore
+
+Where the app offers something new, and where the user can look outside their own
+history. Top to bottom:
+
+- A **Get help** card, opening the assistance box of §5.9. It is present whether
+  or not a provider is configured: without one it still shows the built-in
+  technique ranges and explains that free-form answers need a provider.
+- A **Surprise me** card, which produces an `adventurous` recommendation
+  immediately.
+- **Try something new** — built-in recipes for methods the user has brewed less
+  than three times, and blind-spot suggestions from §12.5.
+- **Explore recipes** — the recipe library proper, not just the user's own. A
+  method filter and a search field over name, method and flavour direction; each
+  built-in recipe opens with its step-by-step technique, its expected total time,
+  pour structure and healthy parameter ranges, its source and lineage, and a
+  one-tap "brew this" / "adopt as mine". This is the deliberate, browsable
+  counterpart to the recommender: the engine suggests, but the user can go
+  looking.
+- **Recipes of mine** — the user's own recipes and adopted built-ins, as a grid.
+- **Beans** — the active bean catalogue, and a discovery list of origins and
+  processes the user has not tried.
+- **Methods** — all nine, each showing how many brews the user has logged, so a
+  blind spot is visible at a glance. Tapping a method opens its built-in guide,
+  including the healthy ranges used by the flaw scan of §11.7.
+
+### Learn
+
+Four sections, matching §12 exactly: Grind & time sensitivity, Your taste
+profile, Patterns worth watching (habitual mistakes), and Blind spots. Plus a
+small set of charts: rating over time, rating by method, rating by bean, and the
+attribute-level profile of the user's best and worst cups. Every chart obeys
+`theme.md` §7 and every insight shows its sample count.
+
+### Settings
+
+Grouped `List` sections, mirroring Coconut's Settings:
+
+- **AI** — provider status, base URL, key, model, transcription engine, language,
+  auto-accept toggle, and a running token/cost total
+- **Brewing** — default units, default method, grind unit preference, the
+  freshness window in days
+- **Equipment** — brewers, grinders and grind settings
+- **Coffee** — roasters and beans
+- **Notifications** — the three reminder toggles of §15
+- **Appearance** — theme mode (light / dark / system)
+- **Data** — backup, restore, export as JSON, and a destructive reset behind a
+  typed confirmation
+- **About** — version, build, repository link, What's New, replay the tutorial
+
+### Stack screens (pushed or modal)
+
+```
+/record                 full-screen modal, the voice session UI
+/record/review          extraction review, diff and clarifying questions
+/brew/[id]              brew detail
+/brew/new               manual entry fallback
+/plan/[id]              plan detail, with its event history
+/plan/new               create a plan
+/recommendation/[id]    a recommendation with its structured rationale
+/tasting/[brewId]       add or edit a tasting
+/bean/[id], /bean/new
+/brewer/[id], /brewer/new
+/roaster/[id], /roaster/new
+/grinder/[id], /grinder/new
+/recipe/[id], /recipe/new
+/method/[id]            built-in method guide: steps, technique, healthy ranges
+/assistant              ask for help — question box and advisory answer
+/insight/[id]
+/ai-provider            provider configuration
+/backup
+/whats-new
+/tutorial               full-screen modal
+/about
+/about/sync            reserved for the future sync screen, renders a "coming later" empty state
+```
+
+### The record screen
+
+The single most important screen in the app. It is a full-screen modal with:
+
+- a large elapsed timer
+- the current phase as a chip row, switchable with one tap without interrupting
+  recording
+- a live waveform or level meter from `expo-audio` sample metering
+- a big pause/resume control and a stop control
+- a scrollable list of the moments recorded so far, each with its phase, its
+  duration and its transcript once available
+- a persistent hint that the user can ramble and nothing needs to be precise
+- a "finish and extract" action that is enabled only once at least one moment has
+  been closed
+
+It never shows a form. The form comes after, in `/record/review`, and only if the
+user wants it.
+
+---
+
+## 15. Notifications
+
+Three local notifications, each individually toggleable, all off-by-default except
+the bean freshness nudge.
+
+1. **Bean freshness.** Fired once per active bean when it crosses the peak window
+   since `roast_date` (default 21 days), and once more at the tail end (default
+   45 days) if still active. Suppressed if the bean has no `roast_date`.
+2. **Low bean.** Fired when a highly-rated active bean's `remaining_weight_g`
+   drops below the dose of the user's typical brew for that method.
+3. **Unlogged session.** Fired a configurable delay (default 4 hours) after a
+   voice session was recorded but never committed. Tapping opens that session's
+   review screen.
+
+All three are scheduled through `expo-notifications` and are local only. There
+are no push notifications, no server, and no analytics.
+
+---
+
+## 16. Backup and Restore
+
+Mirrors Coconut exactly in spirit:
+
+- **Backup** serialises the entire SQLite database to a portable file via the
+  SQLite online backup API, and optionally also exports a human-readable JSON
+  bundle (beans, brews, tastings, recipes) for portability.
+- **Restore** replaces the local database from a backup file, reopens it, re-runs
+  migrations, and reloads the data provider.
+- Audio files are **not** included in the database backup. A separate optional
+  action exports the audio folder as an archive.
+- Credentials in `ai_state` are **stripped** from every backup and export. A
+  restore never imports a key.
+
+---
+
+## 17. Privacy
+
+- The local SQLite database is the single source of truth and the default home of
+  all data. No account. No sign-in. No analytics. No ads. No crash reporting SDK.
+- The only network traffic the app ever makes is to the AI provider the user
+  configured, and only when the user invokes transcription, extraction or
+  narration. Nothing is sent in the background. Opening the app and browsing make
+  zero requests.
+- Audio is uploaded only for transcription, only to the configured transcription
+  engine, and is deletable under §4.5.
+- API keys are stored only in the local database, are never logged, never
+  synced, and never included in a backup.
+- The app requests exactly two Android permissions: `RECORD_AUDIO` and
+  `POST_NOTIFICATIONS`. No storage permission, no camera, no location, no
+  contacts.
+- There is no telemetry of any kind. If the user wants to know what the app sent,
+  the `extraction_runs` table is a complete, inspectable local log of every AI
+  request the app has made, including the exact payload.
+
+---
+
+## 18. Technical Stack
+
+Mandatory. Do not deviate without explicit user approval.
+
+- React Native via **Expo SDK** (same SDK line as Coconut)
+- **TypeScript**, `strict: true`
+- **expo-sqlite** for local storage
+- **Expo Router** for file-based navigation
+- **React Native Paper** (Material Design 3) for UI
+- **dayjs** for date handling
+- **expo-audio** for recording and level metering
+- **expo-notifications** for the three local notifications
+- **expo-file-system** for audio and backup file handling
+- **expo-sharing** for backup export
+- **@expo/vector-icons** for all icons
+- **Jest** + `jest-expo` + `@testing-library/react-native` for tests
+- **react-native-web** + `react-dom` for the desktop web build
+- A minimal HTTP client, or the platform `fetch`, for the AI provider
+
+Explicitly **not** in the stack, and forbidden:
+
+- Any on-device or embedded inference runtime: `llama.rn`, `react-native-ai`,
+  `expo-llm-mediapipe`, MediaPipe, LiteRT, ExecuTorch, `whisper.rn`, ONNX, TFLite
+- Redux / MobX / Zustand or any state-management framework
+- Any backend or cloud service other than the user-configured AI provider
+- Airplane/analytics/crash SDKs
+- `react-native-vector-icons`
+
+Architecture, mirroring Coconut:
+
+```
+src/
+├── app/           Expo Router screens and layouts
+├── components/    Reusable presentational UI (Paper-based)
+├── database/      SQLite schema, migrations, repositories
+├── models/        TypeScript domain interfaces and unions
+├── services/      Pure business logic, no React, no Expo
+├── ai/            Provider transport, prompts, schemas, extraction, assistance
+├── theme/         Material 3 theming (see theme.md)
+├── config/        App metadata, What's New, tutorial, repository
+├── data/          The data provider context
+└── utils/         Generic helpers
+```
+
+`src/services/` holds, at minimum:
+
+```
+recommendation-service.ts   the engine of §11.3
+taste-model-service.ts      the per-knob Bayesian regression
+insight-service.ts          the findings of §12
+tasting-service.ts          tasting aggregation of §10.5
+brew-service.ts             plan-vs-brew diffing, derived ratio
+bean-service.ts             freshness, rotation, remaining weight
+voice-session-service.ts    moments, phases, session lifecycle
+```
+
+`src/ai/` holds:
+
+```
+provider.ts         the transport interface
+openai-compatible.ts the HTTP implementation
+transcription.ts     the two cloud engines plus the manual engine
+schemas.ts          the JSON schemas, derived from the models
+prompts.ts          the versioned prompt templates
+extraction.ts       parse, validate, repair, diff
+assistance.ts       technique Q&A, advisory text, optional flaw block (§5.9)
+```
+
+Every function in `src/services/` has a corresponding unit test. `src/ai/` is
+tested against a recorded fake transport with fixed fixtures; no test ever makes
+a real network call.
+
+---
+
+## 19. Desktop and Web
+
+Android-first, exactly as Coconut. The app must also compile as a local desktop
+web app:
+
+- Expo Web SPA, `react-native-web`
+- `expo-sqlite` via its web/WASM backing, so there is no platform fork in the
+  data layer
+- Native-only capabilities — audio recording, sharing, notifications, the OS
+  speech recogniser — isolated behind platform-safe wrappers with a `.web.ts`
+  variant, never branched on `Platform.OS` inside a shared file
+- On web, the OS recogniser engine is unavailable; the UI degrades to the cloud
+  engine or to manual entry, and says so
+- `npx expo export --platform web` must succeed with no errors caused by our code
+
+---
+
+## 20. Design Philosophy
+
+PassionFruit is a focused personal tool, not a commercial coffee platform, not a
+smart-home hub, and not a social app. In priority order:
+
+1. Recording a brew must be faster than not recording it, or the app has failed.
+2. Voice is the primary interface, but manual entry is always a complete equal.
+3. Nothing is ever lost: not audio, not a transcript, not a half-typed form.
+4. The record is what happened; the plan is what was intended. Never blur them.
+5. Every recommendation must be able to show its evidence.
+6. The user always has the last word; the app proposes, it does not presume.
+7. Works fully offline, degrading only the AI features and nothing else.
+8. Private by default: no account, no analytics, no background network.
+9. Physically plausible always; adventure adjusts the margin, never the bounds.
+10. Visually and structurally a sibling of Coconut at every radius, shadow and
+    icon.
+11. Understand today's coffee at a glance, and know what to brew next.
+
+The north star: open the app, see what to try next, tap record, talk, and have a
+better cup than yesterday.
+
+---
+
+## 21. Project Structure
+
+```
+PassionFruit/
+├── AGENTS.md            conventions and rules for AI agents
+├── README.md            public-facing overview
+├── idea.txt             this file: the product and architecture spec
+├── theme.md             the complete theme and design-token specification
+├── release-plan.md      the running release backlog (gitignored)
+├── LICENSE              MIT
+├── app.json             Expo app configuration
+├── package.json         dependencies and scripts
+├── tsconfig.json        TypeScript, strict
+├── eslint.config.js     Expo lint config
+├── metro.config.js      Metro config
+├── src/                 application source (see §18)
+├── tests/               Jest tests, mirroring src/
+├── assets/              icons, splash, logo
+└── android/             generated by expo prebuild; not hand-edited
+```
+
+`release-plan.md` is gitignored, exactly as in Coconut: it is a local working
+document, not a shared artifact.
+
+---
+
+## 22. Release Process
+
+PassionFruit follows Coconut's release shape so the two are maintained the same
+way:
+
+- A `scripts/update-version.js` bumps `app.json`'s `expo.version` and
+  `expo.android.versionCode`, and regenerates `src/config/release-info.ts`.
+  `versionCode` is a monotonic integer independent of the semver string.
+- A `release.sh` validates a clean git tree, runs unit tests and the type check,
+  builds a release APK with `./gradlew assembleRelease`, and **renames the Gradle
+  artifact `app-release.apk` to `passionfruit.apk`** in the same output directory.
+  It commits `app.json` and `release-info.ts`, tags `v<version>`, pushes, and
+  prints the `gh release create` command. The released file is always named
+  `passionfruit.apk`, mirroring Coconut's `coconut.apk`, never `app-release.apk`.
+- Every release adds a `whats-new.ts` entry and a `release-plan.md` section.
+- Build numbers are never reused and never decremented.
+
+These scripts are not written in this pass. This section defines their required
+behaviour so that the pass which writes them has a specification to satisfy.
+
+---
+
+## 23. Non-Goals
+
+Explicitly out of scope, so that an agent does not build them unprompted:
+
+- No on-device or local inference of any kind (§5)
+- No account, sign-in, or user identity
+- No cloud sync, no Shared Spaces, no social features in v1
+- No Bluetooth scale, smart kettle, or machine integration
+- No camera, no barcode scanning of bags
+- No ads, analytics, telemetry, or crash reporting
+- No web account portal, no public recipe sharing, no marketplace
+- No brew timer running in the background with a foreground service in v1
+- No TDS, extraction-yield or refractometer calculations in v1; the schema
+  leaves room for a manual TDS field but computes nothing from it
+- No custom user-defined methods in v1 (§8.1)
+- No recipes authored by anyone other than the user or the shipped built-ins
+- No import from other coffee apps in v1
+- No iOS release in v1; the app is written to be portable but Android and web
+  are the only verified targets
+- No machine translation of transcripts; the language is whatever the user spoke
+
+Non-goals may be promoted in a later release, but only by editing this section and
+`release-plan.md` in the same change.
+
+---
+
+## 24. Open Questions
+
+These are genuinely undecided and should be resolved by asking the user before
+implementing the feature they touch. They are not blockers for the foundation.
+
+1. **Audio format and compression.** `expo-audio` presets vs an explicit codec.
+   Depends on what the chosen transcription provider accepts most cheaply.
+2. **Where the transcript summary lives.** A short user-facing summary per session
+   may be worth storing alongside the raw transcript. Undecided.
+3. **Recommender evidence floor.** Whether three rated brews is really the right
+   minimum before history-anchoring kicks in, or whether it should be five.
+4. **Insight refresh cadence.** On every brew commit, nightly on app open, or on
+   demand. Undecided.
+5. **Grind normalisation.** Whether to offer a per-grinder conversion table so
+   that "18 clicks on a C40" can be related to "7 on an Ode" for cross-grinder
+   insight. Valuable but fiddly.
+6. **Multiple simultaneous voice sessions.** Disallowed in v1, but whether a
+   tasting session for yesterday's brew should be allowed while today's brew is
+   recording is unresolved.
+7. **Built-in recipe licensing.** The canonical recipes are described in coffee
+   culture terms; whether to credit named published recipes is unresolved.
+8. **A "bad batch" flag.** Whether to let the user mark a whole session as
+   invalid so it is excluded from all learning without being deleted.
